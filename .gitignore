@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+cache/
+.DS_Store
+config.json
+.context/
+

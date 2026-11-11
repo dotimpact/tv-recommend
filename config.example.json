@@ -1,0 +1,36 @@
+{
+  "area_code": "23",
+  "display_limit": 25,
+  "broadcast_types": [
+    "terrestrial",
+    "bs"
+  ],
+  "target_genres": [
+    "documentary",
+    "movie",
+    "hobby",
+    "drama",
+    "anime",
+    "variety",
+    "music",
+    "news",
+    "information",
+    "theater"
+  ],
+  "keywords": [],
+  "exclude_keywords": [
+    "WOWOW"
+  ],
+  "exclude_paid_channels": true,
+  "profile_summary": "",
+  "favorite_series": [],
+  "positive_tags": [],
+  "negative_tags": [],
+  "liked": [],
+  "disliked": [],
+  "seen_ids": [],
+  "last_checked_date": "",
+  "nasne_ips": [],
+  "nasne_quality": 101,
+  "nasne_storage_id": 0
+}
