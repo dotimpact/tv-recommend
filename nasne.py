@@ -316,7 +316,7 @@ class NasneReservationIndex:
         self.valid_service_ids: set[int] = valid_service_ids or set()
         self.by_sid_eid: dict[tuple[int, int], str] = {}
         self.by_sid_start: dict[tuple[int, str], str] = {}
-        self.by_series: dict[str, str] = {}
+        self.by_start_title: dict[tuple[str, str], str] = {}
 
         for r in reservations:
             n_name = r.get("nasne_name") or r.get("nasne_ip") or "nasne"
@@ -328,8 +328,8 @@ class NasneReservationIndex:
             if sid and start_dt:
                 self.by_sid_start[(sid, start_dt)] = n_name
             s_key = normalize_series_key(r.get("clean_title") or r.get("title", ""))
-            if s_key and len(s_key) >= 3:
-                self.by_series[s_key] = n_name
+            if start_dt and s_key and len(s_key) >= 3:
+                self.by_start_title[(start_dt, s_key)] = n_name
 
     def is_receivable(self, program: dict[str, Any]) -> bool:
         """番組の放送局が nasne の受信チャンネルリストに含まれているか判定する。"""
@@ -348,6 +348,12 @@ class NasneReservationIndex:
         番組がすでに nasne で予約済みであれば、予約先の nasne 名 (例: 'nasne2') を返す。
         未予約なら None を返す。
         """
+        start_iso = str(program.get("start_time") or "")
+        if not start_iso and program.get("datetime"):
+            parsed_dt = parse_display_datetime(str(program.get("datetime", "")))
+            if parsed_dt:
+                start_iso = parsed_dt.isoformat()
+
         decoded = decode_bangumi_event_id(
             program.get("id", ""), program.get("channel", "")
         )
@@ -355,12 +361,12 @@ class NasneReservationIndex:
             _btype, sid, eid = decoded
             if (sid, eid) in self.by_sid_eid:
                 return self.by_sid_eid[(sid, eid)]
-            if program.get("start_time") and (sid, str(program["start_time"])) in self.by_sid_start:
-                return self.by_sid_start[(sid, str(program["start_time"]))]
+            if start_iso and (sid, start_iso) in self.by_sid_start:
+                return self.by_sid_start[(sid, start_iso)]
 
         s_key = normalize_series_key(program.get("title", ""))
-        if s_key and s_key in self.by_series:
-            return self.by_series[s_key]
+        if start_iso and s_key and (start_iso, s_key) in self.by_start_title:
+            return self.by_start_title[(start_iso, s_key)]
         return None
 
 
@@ -521,7 +527,7 @@ def reserve_program(
                 res_index.by_sid_start[(sid, start_iso)] = name
                 s_key = normalize_series_key(title)
                 if s_key:
-                    res_index.by_series[s_key] = name
+                    res_index.by_start_title[(start_iso, s_key)] = name
                 dur_min = duration_sec // 60
                 return (
                     True,

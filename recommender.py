@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -7,7 +8,7 @@ import unicodedata
 import warnings
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"google\.genai.*")
 
@@ -126,6 +127,24 @@ class WeightedTag(BaseModel):
     )
 
 
+class NegativeWeightedTag(BaseModel):
+    name: str = Field(description="除外したい具体的な番組シリーズ名または狭い複合要素名")
+    category: Literal["series", "narrow_theme", "subgenre", "broad_genre"] = Field(
+        description=(
+            "粒度分類: "
+            "series=特定の番組名・シリーズ名, "
+            "narrow_theme=明確に絞られた複合要素(例:テレビショッピング,幼児向け,韓流時代劇), "
+            "subgenre=一般的なサブジャンル(例:料理,旅,釣り,刑事ドラマ,時代劇), "
+            "broad_genre=大分類ジャンルや一般名詞(例:アニメ,ドラマ,バラエティ,映画,音楽,スポーツ,歴史,経済)"
+        )
+    )
+    weight: int = Field(
+        description="重要度重み (1〜3: series/通販等は最大3、narrow_themeは最大2、subgenreは1)",
+        ge=1,
+        le=3,
+    )
+
+
 class ProfileSummaryResponse(BaseModel):
     five_rules: list[str] = Field(
         description="ユーザーの好みの全体傾向を表す5箇条", min_length=5, max_length=5
@@ -136,9 +155,127 @@ class ProfileSummaryResponse(BaseModel):
     positive_tags: list[WeightedTag] = Field(
         description="『見たい』履歴から抽出した具体的な関心テーマ・固有名詞・出演者・企画要素と重み(1〜5)。複数回選ばれているテーマは4〜5、単発の個別判断は1〜2を付与し、『好みと違う』で否定された要素は除外・減衰させること"
     )
-    negative_tags: list[WeightedTag] = Field(
-        description="『好みと違う』履歴から抽出した除外したい番組名・ジャンル・要素と重み(1〜5)"
+    negative_tags: list[NegativeWeightedTag] = Field(
+        description=(
+            "『好みと違う』履歴から抽出した具体的な除外番組名または複合的で狭い要素と粒度分類・重み(1〜3)。"
+            "※『アニメ』『ドラマ』『バラエティ』『映画』『音楽』『スポーツ』『料理』『旅』のような大分類ジャンルや一般的な広い単語は入れないこと"
+        )
     )
+
+
+# negative_tags への登録を禁止する大分類ジャンル・一般的な広義語
+BROAD_NEGATIVE_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "アニメ",
+        "アニメーション",
+        "特撮",
+        "ドラマ",
+        "国内ドラマ",
+        "海外ドラマ",
+        "連続ドラマ",
+        "単発ドラマ",
+        "バラエティ",
+        "バラエティー",
+        "映画",
+        "邦画",
+        "洋画",
+        "ドキュメンタリー",
+        "教養",
+        "趣味",
+        "教育",
+        "音楽",
+        "音楽番組",
+        "ライブ",
+        "ニュース",
+        "報道",
+        "情報",
+        "情報番組",
+        "劇場",
+        "公演",
+        "スポーツ",
+        "エンタメ",
+        "エンターテインメント",
+        "番組",
+        "テレビ",
+        "新番組",
+        "再放送",
+        "特集",
+        "スペシャル",
+        "トーク",
+        "トーク番組",
+        "スタジオ",
+        "ランキング",
+        "生放送",
+        "歴史",
+        "科学",
+        "文化",
+        "社会",
+        "経済",
+        "政治",
+        "芸術",
+        "自然",
+        "人間",
+        "世界",
+        "日本",
+        "東京",
+        "韓国",
+        "中国",
+        "アメリカ",
+    }
+)
+
+# やや広いサブジャンル語（negative_tags に入る場合でも重みを最大 2 に制限する）
+GENERIC_SUBGENRE_NEGATIVE_WORDS: frozenset[str] = frozenset(
+    {
+        "料理",
+        "料理番組",
+        "グルメ",
+        "旅",
+        "旅番組",
+        "旅行",
+        "散歩",
+        "街ブラ",
+        "クイズ",
+        "クイズ番組",
+        "お笑い",
+        "コメディ",
+        "恋愛",
+        "ラブコメ",
+        "青春",
+        "学園",
+        "ミステリー",
+        "サスペンス",
+        "刑事",
+        "刑事ドラマ",
+        "医療ドラマ",
+        "時代劇",
+        "韓国ドラマ",
+        "中国ドラマ",
+        "韓流",
+        "華流",
+        "アイドル",
+        "声優",
+        "鉄道",
+        "ゴルフ",
+        "釣り",
+        "将棋",
+        "囲碁",
+        "園芸",
+        "体操",
+        "健康",
+        "美容",
+        "ファッション",
+        "ペット",
+        "動物",
+        "キッズ",
+        "子ども",
+        "幼児",
+        "英会話",
+        "語学",
+        "ワイドショー",
+        "経済ニュース",
+    }
+)
 
 
 def normalize_weighted_list(raw_list: list[Any] | None) -> list[dict[str, Any]]:
@@ -167,6 +304,113 @@ def normalize_weighted_list(raw_list: list[Any] | None) -> list[dict[str, Any]]:
         if key not in merged or weight > merged[key]["weight"]:
             merged[key] = {"name": name, "weight": weight}
     return sorted(merged.values(), key=lambda x: x["weight"], reverse=True)
+
+
+def _load_cached_corpus_texts() -> list[str]:
+    """cache/*.json から全番組の title + description テキスト一覧を読み込む（DF算出用）。"""
+    cache_dir = Path(__file__).parent / "cache"
+    if not cache_dir.exists():
+        return []
+    by_id: dict[str, str] = {}
+    for cfile in sorted(cache_dir.glob("*.json")):
+        try:
+            items = json.loads(cfile.read_text(encoding="utf-8"))
+            for p in items:
+                pid = p.get("id")
+                if pid and pid not in by_id:
+                    by_id[pid] = f"{p.get('title', '')} {p.get('description', '')}".lower()
+        except Exception:
+            pass
+    return list(by_id.values())
+
+
+def sanitize_negative_tags(
+    raw_list: list[Any] | None,
+    liked: list[dict[str, Any]] | None = None,
+    candidates: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    3つの高度な検知＋固定辞書により negative_tags を精製する：
+    1) スキーマ粒度分類 (category) ＆ 固定辞書による大分類・広義語の除外と重み上限
+    2) liked（見たい履歴）との衝突検知（過去に選んだ番組にも含まれる一般語は除外）
+    3) 番組コーパス全体での出現率 (Document Frequency) 検知（2.5%以上にヒットする広義語は除外、1.2%以上は★1に減衰）
+    """
+    if not raw_list:
+        return []
+
+    # 1. category 属性を保持しつつ正規化
+    raw_categories: dict[str, str] = {}
+    for item in raw_list:
+        if isinstance(item, dict):
+            n = str(item.get("name") or item.get("tag") or "").strip().lower()
+            cat = str(item.get("category") or "").strip()
+            if n and cat:
+                raw_categories[n] = cat
+
+    normalized = normalize_weighted_list(raw_list)
+
+    liked_texts: list[str] = [
+        f"{x.get('title', '')} {x.get('description', '')}".lower()
+        for x in (liked or [])
+    ]
+    if candidates is not None:
+        corpus_texts = [
+            f"{c.get('title', '')} {c.get('description', '')}".lower()
+            for c in candidates
+        ]
+    else:
+        corpus_texts = _load_cached_corpus_texts()
+    n_corpus = len(corpus_texts)
+
+    sanitized: list[dict[str, Any]] = []
+    for item in normalized:
+        name = unicodedata.normalize("NFKC", item["name"]).strip()
+        low = name.lower()
+        cat = raw_categories.get(low, "")
+        stripped_prog = re.sub(r"番組$", "", low).strip()
+
+        # ③ 粒度分類 & 固定ストップワードによる大分類除外
+        if (
+            len(low) < 2
+            or cat == "broad_genre"
+            or low in BROAD_NEGATIVE_STOPWORDS
+            or stripped_prog in BROAD_NEGATIVE_STOPWORDS
+        ):
+            continue
+
+        is_shopping = any(sk.lower() in low for sk in ("ショッピング", "通販", "テレショップ", "買物"))
+
+        # ② liked 履歴との衝突検知（過去に「見たい」と選んだ番組のタイトル・概要に含まれる語はNGタグから除外）
+        if liked_texts and not is_shopping:
+            liked_hits = sum(1 for lt in liked_texts if low in lt)
+            if liked_hits >= 1:
+                continue
+
+        weight = item["weight"]
+        if (
+            cat == "subgenre"
+            or low in GENERIC_SUBGENRE_NEGATIVE_WORDS
+            or stripped_prog in GENERIC_SUBGENRE_NEGATIVE_WORDS
+        ):
+            weight = min(weight, 1)
+        elif cat == "narrow_theme":
+            weight = min(weight, 2)
+        else:
+            weight = min(weight, 3)
+
+        # ① 番組コーパスにおける出現率 (DF) 検知
+        if n_corpus >= 50 and not is_shopping:
+            df_count = sum(1 for ct in corpus_texts if low in ct)
+            df_ratio = df_count / n_corpus
+            if df_ratio >= 0.025:
+                # 全体の2.5%以上にヒットするワードは一般的すぎるため除外
+                continue
+            if df_ratio >= 0.012:
+                # 1.2%〜2.5%にヒットするやや広いワードは重みを最大1に制限
+                weight = min(weight, 1)
+
+        sanitized.append({"name": name, "weight": weight})
+    return sorted(sanitized, key=lambda x: x["weight"], reverse=True)
 
 
 def format_weighted_tags(items: list[Any] | None) -> str:
@@ -337,7 +581,11 @@ def _build_scoring_prompt(
     profile_summary = (config.get("profile_summary") or "").strip()
     favorite_series = normalize_weighted_list(config.get("favorite_series"))
     positive_tags = normalize_weighted_list(config.get("positive_tags"))
-    negative_tags = normalize_weighted_list(config.get("negative_tags"))
+    negative_tags = sanitize_negative_tags(
+        config.get("negative_tags"),
+        liked=config.get("liked"),
+        candidates=candidates,
+    )
     # タグ蓄積がある場合は直近10件のみ、まだない場合は直近20件をFew-shot例として渡す（プロンプト軽量化・高速化）
     recent_limit = 10 if positive_tags else 20
     liked = (config.get("liked") or [])[-recent_limit:]
@@ -477,7 +725,13 @@ def rank_candidates_locally(
         x for x in normalize_weighted_list(config.get("positive_tags")) if len(x["name"]) >= 2
     ]
     neg_tags = [
-        x for x in normalize_weighted_list(config.get("negative_tags")) if len(x["name"]) >= 2
+        x
+        for x in sanitize_negative_tags(
+            config.get("negative_tags"),
+            liked=config.get("liked"),
+            candidates=candidates,
+        )
+        if len(x["name"]) >= 2
     ]
     liked: list[dict[str, Any]] = config.get("liked") or []
     disliked: list[dict[str, Any]] = config.get("disliked") or []
@@ -529,25 +783,31 @@ def rank_candidates_locally(
             u1, u2 = u2, u1
         return sum(val * u2[k] for k, val in u1.items() if k in u2)
 
-    def _tag_matches(tag_name: str, hay_text: str) -> bool:
+    def _pos_tag_matches(tag_name: str, hay_text: str) -> bool:
         t_low = tag_name.lower().strip()
         if t_low in hay_text:
             return True
-        # 「時代劇ドラマ」→「時代劇」、「英会話講座」→「英会話」のように末尾の一般語を除いた語幹でも照合
-        stem = re.sub(r"(ドラマ|番組|講座|企画|向け教育|教育|ニュース)$", "", t_low).strip()
-        if len(stem) >= 2 and stem in hay_text:
+        stem = re.sub(r"(番組|講座|企画)$", "", t_low).strip()
+        if len(stem) >= 3 and stem in hay_text:
             return True
         return False
 
+    def _neg_tag_matches(tag_name: str, title_desc_text: str) -> bool:
+        # NGタグは語幹切り詰め（「韓国ドラマ」→「韓国」など）を行わず、
+        # また genre 文字列とも照合しないことで、広範な巻き添え減点を防ぐ
+        t_low = tag_name.lower().strip()
+        return bool(t_low and t_low in title_desc_text)
+
     scored_items: list[tuple[float, dict[str, Any]]] = []
     for idx, c in enumerate(candidates):
-        hay = f"{c.get('title', '')} {c.get('description', '')} {c.get('genre', '')}".lower()
+        title_desc_hay = f"{c.get('title', '')} {c.get('description', '')}".lower()
+        hay = f"{title_desc_hay} {c.get('genre', '')}".lower()
         ch = c.get("channel") or ""
 
-        # 学習された negative_tags は足切り（除外）せず、重みに応じた減点（相殺方式）とする。
-        # これにより、お気に入り枠や強いポジティブタグが上回る番組は候補に残る。
-        neg_hits = [nt for nt in neg_tags if _tag_matches(nt["name"], hay)]
-        neg_tag_penalty = sum(nt["weight"] * 0.45 for nt in neg_hits)
+        # 学習された negative_tags はタイトル・概要に完全部分一致した場合のみ緩やかに減点し、
+        # 減点合計にも上限 (1.0) を設けることでジャンル全体や関心番組が潰れないようにする。
+        neg_hits = [nt for nt in neg_tags if _neg_tag_matches(nt["name"], title_desc_hay)]
+        neg_tag_penalty = min(1.0, sum(nt["weight"] * 0.25 for nt in neg_hits))
 
         u_doc = _to_unit_tfidf(doc_vecs[idx])
 
@@ -564,7 +824,7 @@ def rank_candidates_locally(
         max_neg_sim = max((_dot(u_doc, u_d) for u_d in unit_disliked), default=0.0)
 
         series_hits = [s for s in fav_series if s["name"].lower() in hay]
-        tag_hits = [t for t in pos_tags if _tag_matches(t["name"], hay)]
+        tag_hits = [t for t in pos_tags if _pos_tag_matches(t["name"], hay)]
 
         series_boost = max((s["weight"] * 0.9 for s in series_hits), default=0.0)
         tag_boost = min(5.0, sum(t["weight"] * 0.55 for t in tag_hits))
@@ -572,8 +832,8 @@ def rank_candidates_locally(
         # 放送大学は具体的な関心タグにヒットしていない場合、スコアを少し抑える
         ouj_penalty = 0.8 if ("放送大学" in ch and not tag_hits) else 0.0
         is_new = is_new_program(c)
-        # 新番組ボーナスは NGタグに該当しない番組に対して適度(+0.95)に加算し、既存の好みとのバランスを保つ
-        new_boost = 0.95 if (is_new and "放送大学" not in ch and not neg_hits) else 0.0
+        # 新番組ボーナスは強いNGタグに該当しない番組に対して加算
+        new_boost = 0.95 if (is_new and "放送大学" not in ch and neg_tag_penalty < 0.75) else 0.0
 
         total_score = (
             best_sim * 7.5
@@ -748,13 +1008,14 @@ def summarize_profile(config: dict[str, Any]) -> dict[str, Any]:
 
     existing_series = normalize_weighted_list(config.get("favorite_series"))
     existing_pos = normalize_weighted_list(config.get("positive_tags"))
-    existing_neg = normalize_weighted_list(config.get("negative_tags"))
+    existing_neg = sanitize_negative_tags(config.get("negative_tags"), liked=liked)
 
     lines = [
         "以下はユーザーが過去に「見たい (Liked)」または「好みと違う (Disliked)」と分類したテレビ番組の履歴と、現在蓄積されているタグ一覧です。",
         "単なる無限追記ではなく、**個別の具体的な判断を残しつつ、重要度の重み付け (weight: 1〜5) と新陳代謝（強化・減衰・整理）** を行って以下の4項目を出力してください：",
         "",
         "1. five_rules: 全体の好みの境界線（5箇条）",
+        "   - ※注意: 個別のアニメやドラマ・バラエティを数件『好みと違う』にしただけで「アニメは避ける」「ドラマは避ける」のように大分類ジャンル全体を否定するルールを書かないこと。",
         "2. favorite_series: 『見たい』に含まれる番組のシリーズ名・枠名と重み(1〜5)。",
         "   - 複数回選ばれている定番シリーズは weight=4〜5、1回選ばれたシリーズは weight=2〜3。",
         "   - ※注意: 『放送大学』の個別講義名（例: 『知覚・認知心理学』『現代アメリカの政治と社会』等）はシリーズ枠ではないため favorite_series には入れず、positive_tags 側でテーマとして扱うこと。",
@@ -763,7 +1024,9 @@ def summarize_profile(config: dict[str, Any]) -> dict[str, Any]:
         "   - 複数の番組に共通して現れる中核テーマ（例: 社会心理学、アメリカ政治、博物館、ものづくり、SFアクション等）は weight=4〜5 に強化する。",
         "   - 1回だけ選ばれた個別具体的な固有名詞・トピックは消さずに weight=1〜2 として残す。",
         "   - 『好みと違う (Disliked)』で否定された要素や、広すぎてノイズになる一般語は整理・除外する。",
-        "4. negative_tags: 『好みと違う』の各番組から読み取れる除外したい番組名・対象年齢層・定型ジャンル名（例: 幼児、時代劇、英会話、通販 など部分一致しやすい短い語）と重み(1〜5)。",
+        "4. negative_tags: 『好みと違う』の各番組から読み取れる具体的な除外対象（特定の番組シリーズ名、または『通販』『幼児向け』『韓流時代劇』『ゴシップワイドショー』など狭い複合カテゴリ）と重み(1〜3)。",
+        "   - **絶対禁止**: 『アニメ』『ドラマ』『バラエティ』『映画』『音楽』『スポーツ』『ニュース』『情報』『趣味』『教養』のような大分類ジャンル名や、『料理』『旅』『トーク』『歴史』『経済』のような一般的な広い単語を入れてはいけない。",
+        "   - 個別のアニメやドラマをいくつか選ばなかったからといってジャンル全体のNG重みを増やさず、重みは原則 weight=1〜2（明確な通販・幼児枠などでも最大3）に抑えること。",
         "",
         f"※現在の favorite_series: {format_weighted_tags(existing_series) or 'なし'}",
         f"※現在の positive_tags: {format_weighted_tags(existing_pos) or 'なし'}",
@@ -800,9 +1063,12 @@ def summarize_profile(config: dict[str, Any]) -> dict[str, Any]:
             [t.model_dump() for t in parsed.favorite_series]
         ),
         "positive_tags": normalize_weighted_list(
-            [t.model_dump() for t in parsed.positive_tags]
+            [t.model_dump() for t in parsed.positive_series if hasattr(parsed, "positive_series")]
+            if False
+            else [t.model_dump() for t in parsed.positive_tags]
         ),
-        "negative_tags": normalize_weighted_list(
-            [t.model_dump() for t in parsed.negative_tags]
+        "negative_tags": sanitize_negative_tags(
+            [t.model_dump() for t in parsed.negative_tags],
+            liked=liked,
         ),
     }

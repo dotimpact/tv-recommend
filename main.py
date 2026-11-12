@@ -3,9 +3,16 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
+
+_VENV_DIR = Path(__file__).resolve().parent / ".venv"
+_VENV_PYTHON = _VENV_DIR / "bin" / "python"
+if _VENV_PYTHON.exists() and Path(sys.prefix).resolve() != _VENV_DIR.resolve():
+    os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON), *sys.argv])
+
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.key_binding import KeyBindings
@@ -353,7 +360,7 @@ def interactive_feedback(
 
     today_str = dt.date.today().isoformat()
     liked_count = 0
-    record_targets: list[dict[str, Any]] = []
+    record_targets: list[tuple[dict[str, Any], dict[str, Any]]] = []
     disliked_count = 0
 
     for p in picks:
@@ -374,7 +381,7 @@ def interactive_feedback(
             config["liked"].append(entry)
             liked_count += 1
             if choice == "record":
-                record_targets.append(p)
+                record_targets.append((p, entry))
         elif choice == "dislike":
             config["disliked"].append(
                 {
@@ -402,12 +409,28 @@ def interactive_feedback(
 
     if record_targets:
         console.print("\n[bold magenta]📹 nasne へ録画予約を登録中...[/bold magenta]")
-        for p in record_targets:
+        failed_count = 0
+        for p, entry in record_targets:
             ok, msg = reserve_program(p, config, nasnes=nasnes, res_index=res_index)
+            if p.get("start_time"):
+                entry["start_time"] = p["start_time"]
+            if p.get("duration"):
+                entry["duration"] = int(p["duration"])
             if ok:
+                entry.pop("record_failed", None)
+                entry.pop("record_error", None)
                 console.print(f"  [bold green]✔ {msg}[/bold green]")
             else:
+                entry["record_failed"] = True
+                entry["record_error"] = msg
+                failed_count += 1
                 console.print(f"  [bold red]✖ {msg}[/bold red]")
+        save_config(config)
+        if failed_count > 0:
+            console.print(
+                "[bold yellow]💡 予約失敗した番組も「〇 選ぶ (liked)」に残っています。"
+                "競合解消後などに `python main.py record` で再予約できます。[/bold yellow]"
+            )
     elif liked_count > 0:
         console.print(
             "[dim]💡 選んだ番組リストからあとで録画予約する場合は `python main.py record` を実行してください。[/dim]"
@@ -928,8 +951,7 @@ def _enrich_and_collect_upcoming_liked(
 
     now = dt.datetime.now(JST)
     exclude_paid = bool(config.get("exclude_paid_channels", True))
-    seen_keys: set[str] = set()
-    upcoming_with_dt: list[tuple[dt.datetime, dict[str, Any]]] = []
+    by_dedup_key: dict[str, tuple[dt.datetime, dict[str, Any]]] = {}
 
     for entry in config.get("liked", []):
         title = entry.get("title", "")
@@ -956,11 +978,16 @@ def _enrich_and_collect_upcoming_liked(
             continue
 
         dedup_key = entry.get("id") or f"{title}_{dt_str}"
-        if dedup_key in seen_keys:
-            continue
-        seen_keys.add(dedup_key)
-        upcoming_with_dt.append((start_dt, entry))
+        if dedup_key in by_dedup_key:
+            prev_entry = by_dedup_key[dedup_key][1]
+            if entry.get("record_failed") and not prev_entry.get("record_failed"):
+                prev_entry["record_failed"] = True
+                prev_entry["record_error"] = entry.get("record_error", "")
+            by_dedup_key[dedup_key] = (start_dt, entry)
+        else:
+            by_dedup_key[dedup_key] = (start_dt, entry)
 
+    upcoming_with_dt = list(by_dedup_key.values())
     upcoming_with_dt.sort(key=lambda x: x[0])
     return [item for _dt, item in upcoming_with_dt]
 
@@ -972,17 +999,28 @@ def prompt_record_from_liked(
 ) -> list[dict[str, Any]] | None:
     """
     「〇 選ぶ (liked)」にした未来の番組リストから、nasne に録画予約する番組を選択する TUI。
+    前回予約失敗した番組 (record_failed=True) は自動で再予約対象として選択状態にする。
     """
     selected: list[bool] = [False] * len(programs)
-    cursor = 0
+    cursor: int | None = None
     reserved_map: dict[int, str] = {}
     unreceivable_set: set[int] = set()
+    failed_set: set[int] = set()
     for idx, p in enumerate(programs):
         n_name = res_index.find_reserved_nasne(p)
         if n_name:
             reserved_map[idx] = n_name
+            p.pop("record_failed", None)
+            p.pop("record_error", None)
         elif not res_index.is_receivable(p):
             unreceivable_set.add(idx)
+        elif p.get("record_failed"):
+            failed_set.add(idx)
+            selected[idx] = True
+            if cursor is None:
+                cursor = idx
+    if cursor is None:
+        cursor = 0
 
     nasne_label = (
         ", ".join(f"{n['name']}({n['ip']})" for n in nasnes)
@@ -1022,7 +1060,12 @@ def prompt_record_from_liked(
                 badge_text = "[受信外:不可 ]"
             elif selected[idx]:
                 badge_style = "class:record_cur" if is_cur else "class:record"
-                badge_text = "[● 録画する  ]"
+                badge_text = (
+                    "[● 再予約する]" if idx in failed_set else "[● 録画する  ]"
+                )
+            elif idx in failed_set:
+                badge_style = "class:failed_cur" if is_cur else "class:failed"
+                badge_text = "[! 前回失敗  ]"
             else:
                 badge_style = "class:skip_cur" if is_cur else "class:skip"
                 badge_text = "[ー 未予約   ]"
@@ -1060,6 +1103,13 @@ def prompt_record_from_liked(
                 f"   🗓 {cur_p.get('datetime', '')}  /  📡 {cur_p.get('channel', '')}\n",
             )
         )
+        if cur_p.get("record_error"):
+            frags.append(
+                (
+                    "class:failed",
+                    f"   ⚠ 前回の失敗理由: {cur_p.get('record_error')}\n",
+                )
+            )
         frags.append(("class:detail_desc", f"   {desc}\n"))
         frags.append(
             (
@@ -1075,12 +1125,14 @@ def prompt_record_from_liked(
     @kb.add("k")
     def _up(_e: Any) -> None:
         nonlocal cursor
+        assert cursor is not None
         cursor = (cursor - 1) % len(programs)
 
     @kb.add("down")
     @kb.add("j")
     def _down(_e: Any) -> None:
         nonlocal cursor
+        assert cursor is not None
         cursor = (cursor + 1) % len(programs)
 
     @kb.add("space")
@@ -1089,6 +1141,7 @@ def prompt_record_from_liked(
     @kb.add("right")
     @kb.add("left")
     def _toggle(_e: Any) -> None:
+        assert cursor is not None
         if cursor not in reserved_map and cursor not in unreceivable_set:
             selected[cursor] = not selected[cursor]
 
@@ -1116,6 +1169,8 @@ def prompt_record_from_liked(
             "record_cur": "bold ansimagenta reverse",
             "reserved": "bold ansigreen",
             "reserved_cur": "bold ansigreen reverse",
+            "failed": "bold ansired",
+            "failed_cur": "bold ansired reverse",
             "skip": "ansibrightblack",
             "skip_cur": "bold reverse",
             "divider": "ansibrightblack",
@@ -1154,18 +1209,24 @@ def cmd_record(args: argparse.Namespace) -> None:
             header_style="bold cyan",
         )
         table.add_column("No", justify="right", width=3)
-        table.add_column("状態", width=14)
+        table.add_column("状態", width=16)
         table.add_column("放送日時 / 放送局", style="green", width=22)
         table.add_column("タイトル / 概要", style="white")
         for idx, p in enumerate(upcoming, 1):
             n_name = res_index.find_reserved_nasne(p)
-            st = (
-                f"[bold green]✔ 予約済({n_name})[/bold green]"
-                if n_name
-                else "[dim]ー 未予約[/dim]"
-            )
+            if n_name:
+                st = f"[bold green]✔ 予約済({n_name})[/bold green]"
+            elif p.get("record_failed"):
+                st = "[bold red]! 前回予約失敗[/bold red]"
+            else:
+                st = "[dim]ー 未予約[/dim]"
             dt_ch = f"{p.get('datetime', '')}\n[bold]{p.get('channel', '')}[/bold]"
-            body = f"[bold]{p.get('title', '')}[/bold]\n[dim]{p.get('description', '')}[/dim]"
+            err_line = (
+                f"\n[red]⚠ {p['record_error']}[/red]"
+                if (not n_name and p.get("record_error"))
+                else ""
+            )
+            body = f"[bold]{p.get('title', '')}[/bold]\n[dim]{p.get('description', '')}[/dim]{err_line}"
             table.add_row(str(idx), st, dt_ch, body)
         console.print(table)
         return
@@ -1175,6 +1236,7 @@ def cmd_record(args: argparse.Namespace) -> None:
         console.print("[yellow]キャンセルされました。[/yellow]")
         return
     if not targets:
+        save_config(config)
         console.print("[dim]新規に録画予約する番組は選択されませんでした。[/dim]")
         return
 
@@ -1182,8 +1244,12 @@ def cmd_record(args: argparse.Namespace) -> None:
     for p in targets:
         ok, msg = reserve_program(p, config, nasnes=nasnes, res_index=res_index)
         if ok:
+            p.pop("record_failed", None)
+            p.pop("record_error", None)
             console.print(f"  [bold green]✔ {msg}[/bold green]")
         else:
+            p["record_failed"] = True
+            p["record_error"] = msg
             console.print(f"  [bold red]✖ {msg}[/bold red]")
     save_config(config)
 
